@@ -29,7 +29,8 @@ JST = dt.timezone(dt.timedelta(hours=9))           # 時刻ズレ対策メモの
 JPX_INDEX = "https://www.jpx.co.jp/markets/statistics-equities/short-selling/index.html"
 JPX_HOST  = "https://www.jpx.co.jp"
 STOOQ_NKX = "https://stooq.com/q/d/l/"             # ?s=^nkx&i=d で日経225日足CSV
-WINDOW    = 90                                      # 保持する営業日数
+KEEP_ALL  = True                                    # True=全履歴を蓄積（90日制限なし）／False=直近WINDOW日だけ表示
+WINDOW    = 90                                       # KEEP_ALL=False のときの表示日数
 
 ROOT = Path(__file__).resolve().parent.parent       # リポジトリルート想定
 DATA_FILE   = ROOT / "data"   / "shortsell-data.json"
@@ -129,15 +130,17 @@ def main():
         }
         print(f"  + {date}  合計{ss['sr_total']}%  日経{nk['nk_close']}")
 
-    # 直近90営業日に整形
-    ordered = [records[d] for d in sorted(records)][-WINDOW:]
-    payload = json.dumps(ordered, ensure_ascii=False, indent=1)
+    # マスタ(data/)は常に全履歴を保存。public/ は表示用（既定は全履歴、KEEP_ALL=Falseで直近WINDOW日）
+    all_sorted = [records[d] for d in sorted(records)]
+    master_payload = json.dumps(all_sorted, ensure_ascii=False, indent=1)
+    public_rows = all_sorted if KEEP_ALL else all_sorted[-WINDOW:]
+    public_payload = json.dumps(public_rows, ensure_ascii=False, indent=1)
 
     DATA_FILE.parent.mkdir(parents=True, exist_ok=True)
     PUBLIC_FILE.parent.mkdir(parents=True, exist_ok=True)
-    DATA_FILE.write_text(payload, "utf-8")          # リポジトリ側の蓄積（gitに残す）
-    PUBLIC_FILE.write_text(payload, "utf-8")         # FTPアップロード対象
-    print(f"書き出し完了: {len(ordered)}営業日 / 最新 {ordered[-1]['date'] if ordered else '—'}")
+    DATA_FILE.write_text(master_payload, "utf-8")     # 全履歴（gitに蓄積、消えない）
+    PUBLIC_FILE.write_text(public_payload, "utf-8")    # FTPアップロード対象（表示用）
+    print(f"蓄積: 全{len(all_sorted)}営業日 / 表示{len(public_rows)}営業日 / 最新 {all_sorted[-1]['date'] if all_sorted else '—'}")
 
 
 if __name__ == "__main__":

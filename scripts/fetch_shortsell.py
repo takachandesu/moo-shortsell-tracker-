@@ -16,6 +16,8 @@ import io
 import json
 import re
 import sys
+import time
+import urllib.parse
 import datetime as dt
 from pathlib import Path
 
@@ -28,7 +30,8 @@ import pdfplumber
 JST = dt.timezone(dt.timedelta(hours=9))           # 時刻ズレ対策メモの教訓: JSTを明示
 JPX_INDEX = "https://www.jpx.co.jp/markets/statistics-equities/short-selling/index.html"
 JPX_HOST  = "https://www.jpx.co.jp"
-STOOQ_NKX = "https://stooq.com/q/d/l/"             # ?s=^nkx&i=d で日経225日足CSV
+YAHOO_NKX = "https://query1.finance.yahoo.com/v8/finance/chart/%5EN225"  # 日経225 (^N225)
+STOOQ_NKX = "https://stooq.com/q/d/l/"             # 予備: ?s=^nkx&i=d で日経225日足CSV
 KEEP_ALL  = True                                    # True=全履歴を蓄積（90日制限なし）／False=直近WINDOW日だけ表示
 WINDOW    = 90                                       # KEEP_ALL=False のときの表示日数
 
@@ -80,20 +83,85 @@ def parse_shortsell_pdf(url):
 
 
 # ─────────────────────────────────────────────
-# Stooq: 日経225 日足CSV → {date: (close, change)}
+# 日経225 日足の取得: Yahoo Finance(^N225)を主、Stooqを予備
+#   時刻ズレ対策メモの教訓: Yahooのtimestampはエポック秒 → JSTに変換して日付化する
 # ─────────────────────────────────────────────
-def fetch_nikkei():
-    r = requests.get(STOOQ_NKX, params={"s": "^nkx", "i": "d"}, headers=HEADERS, timeout=30)
-    rows = [ln.split(",") for ln in r.text.strip().splitlines()[1:]]  # Date,Open,High,Low,Close,Volume
+def _parse_yahoo_chart(payload):
+    """Yahoo chart JSONを {date:{nk_close,nk_change}} に。形式が想定外なら空dictを返す（落とさない）。"""
+    try:
+        res = payload["chart"]["result"][0]
+        ts     = res["timestamp"]
+        closes = res["indicators"]["quote"][0]["close"]
+    except (KeyError, IndexError, TypeError):
+        return {}
     out, prev = {}, None
-    for row in rows:
-        if len(row) < 5 or row[4] in ("", "N/D"):
-            continue
-        date, close = row[0], float(row[4])
-        change = None if prev is None else round(close - prev, 2)
-        out[date] = {"nk_close": round(close, 2), "nk_change": change}
+    for t, c in zip(ts, closes):
+        if c is None:
+            continue                      # 休場・欠損バーはスキップ
+        date = dt.datetime.fromtimestamp(t, JST).date().isoformat()  # JSTで日付化（UTC扱いだと日付がズレる）
+        close = round(float(c), 2)
+        out[date] = {"nk_close": close,
+                     "nk_change": None if prev is None else round(close - prev, 2)}
         prev = close
     return out
+
+
+def _parse_stooq_csv(text):
+    """予備: StooqのCSVテキストを同じ形式に。CSVでなければ空dictを返す（落とさない）。"""
+    lines = text.strip().splitlines()
+    if not lines or not lines[0].lower().startswith("date"):
+        return {}                       # HTML/エラーページ等。CSVではない
+    out, prev = {}, None
+    for ln in lines[1:]:
+        row = ln.split(",")
+        if len(row) < 5 or row[4] in ("", "N/D"):
+            continue
+        try:
+            close = float(row[4])       # 異常な行（JS片など）はスキップ
+        except ValueError:
+            continue
+        date = row[0]
+        out[date] = {"nk_close": round(close, 2),
+                     "nk_change": None if prev is None else round(close - prev, 2)}
+        prev = close
+    return out
+
+
+def fetch_nikkei():
+    """日経225日足を取得。主=Yahoo Finance ^N225（直近1年の日足）、予備=Stooq。
+       いずれも失敗しても例外を投げず空dictを返す（その日のnk_closeは後日backfillされる）。"""
+    # 1) Yahoo Finance 直叩き（最大3回リトライ）
+    for i in range(3):
+        try:
+            r = requests.get(YAHOO_NKX, params={"range": "1y", "interval": "1d"},
+                             headers=HEADERS, timeout=30)
+            data = _parse_yahoo_chart(r.json())
+            if data:
+                return data
+            print(f"  nikkei: Yahoo応答が想定外(試行{i+1}) HTTP{r.status_code}", file=sys.stderr)
+        except Exception as e:
+            print(f"  nikkei: Yahoo {i+1}回目失敗 {e}", file=sys.stderr)
+        time.sleep(3 * (i + 1))
+    # 2) Yahoo をPHPプロキシ経由で（Lolipop側IPから。許可ドメイン登録済み）
+    try:
+        inner = YAHOO_NKX + "?range=1y&interval=1d"
+        proxy = "https://moo-stock-blog.com/stock-proxy.php?url=" + urllib.parse.quote(inner, safe="")
+        h = dict(HEADERS, Referer="https://moo-stock-blog.com/")
+        data = _parse_yahoo_chart(requests.get(proxy, headers=h, timeout=30).json())
+        if data:
+            return data
+    except Exception as e:
+        print(f"  nikkei: Yahooプロキシ失敗 {e}", file=sys.stderr)
+    # 3) 最終予備: Stooq直叩き
+    try:
+        data = _parse_stooq_csv(requests.get(STOOQ_NKX, params={"s": "^nkx", "i": "d"},
+                                             headers=HEADERS, timeout=30).text)
+        if data:
+            return data
+    except Exception as e:
+        print(f"  nikkei: Stooq予備も失敗 {e}", file=sys.stderr)
+    print("  nikkei: 今回は取得できず（nk_closeは後日backfill）", file=sys.stderr)
+    return {}
 
 
 # ─────────────────────────────────────────────
@@ -129,6 +197,16 @@ def main():
             **ss,
         }
         print(f"  + {date}  合計{ss['sr_total']}%  日経{nk['nk_close']}")
+
+    # backfill: 過去にStooq失敗でnk_closeが欠けている日を、今回取得できた値で埋め直す
+    filled = 0
+    for date, rec in records.items():
+        if rec.get("nk_close") is None and date in nikkei:
+            rec["nk_close"]  = nikkei[date]["nk_close"]
+            rec["nk_change"] = nikkei[date]["nk_change"]
+            filled += 1
+    if filled:
+        print(f"  backfill: nk_close を {filled}日分 補完")
 
     # マスタ(data/)は常に全履歴を保存。public/ は表示用（既定は全履歴、KEEP_ALL=Falseで直近WINDOW日）
     all_sorted = [records[d] for d in sorted(records)]

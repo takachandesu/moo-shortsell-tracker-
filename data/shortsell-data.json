@@ -1240,5 +1240,14 @@
   "sr_total": 39.1,
   "sr_restricted": 29.8,
   "sr_unrestricted": 9.2
+ },
+ {
+  "date": "2026-08-20",
+  "nk_close": 66216.79,
+  "nk_change": 890.37,
+  "prime_volume": null,
+  "sr_total": 39.1,
+  "sr_restricted": 29.5,
+  "sr_unrestricted": 9.6
  }
 ]

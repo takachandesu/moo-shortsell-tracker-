@@ -1504,11 +1504,20 @@
  },
  {
   "date": "2026-10-05",
-  "nk_close": null,
-  "nk_change": null,
+  "nk_close": 69946.86,
+  "nk_change": 1637.4,
   "prime_volume": null,
   "sr_total": 38.9,
   "sr_restricted": 32.4,
   "sr_unrestricted": 6.4
+ },
+ {
+  "date": "2026-10-06",
+  "nk_close": null,
+  "nk_change": null,
+  "prime_volume": null,
+  "sr_total": 38.0,
+  "sr_restricted": 31.1,
+  "sr_unrestricted": 6.9
  }
 ]
